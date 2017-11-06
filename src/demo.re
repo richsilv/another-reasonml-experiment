@@ -9,7 +9,7 @@ and perceptron = {
   transfer: (float) => float,
 };
 
-type networkInputs = array(float);
+type networkInputs = array(input);
 
 let makeWeights = fun(length: int) => {
   Array.map(
@@ -109,13 +109,13 @@ let rec makeNetworkRecursive = fun(shape: list(int), net: option(network)) => {
     | [layerSize, ...layers] => {
       makeNetworkRecursive(
         layers,
-        Array.append(
+        Some(Array.append(
           existing,
           [|Array.map(
             (_) => makePerceptron(inputs),
             Array.make(layerSize, 0)
           )|]
-        )
+        ))
       )
     }
   }
@@ -125,8 +125,54 @@ let makeNetwork = fun(shape: list(int)) => {
   makeNetworkRecursive(shape, None);
 };
 
-let x = makePerceptron([|Input(1.0), Input(2.0)|]);
-let y = makePerceptron([|Input(1.0), Input(2.0)|]);
-let z = makePerceptron([|Perceptron(x), Perceptron(y)|]);
+let calcOutput = fun(net: network) => {
+  let outputLayer = Array.get(net, Array.length(net) - 1);
+  Array.map(
+    (perc) => calcOutput(perc),
+    outputLayer
+  );
+};
 
-Js.log(calcOutput(z));
+let setInputs = fun(net: network, inputs: networkInputs) => {
+  let inputLayer = Array.get(net, 0);
+  ignore(Array.map(
+    (perc) => perc.inputNodes = inputs,
+    inputLayer
+  ));
+  ignore(Array.map(
+    (layer) => Array.map(
+      (perc) => perc.invalid = true,
+      layer
+    ),
+    net
+  ));
+
+  net;
+};
+
+let logOutput= fun(net: network) {
+  Js.log("Inputs");
+  ignore(Array.map(
+    (inputNode) => switch inputNode {
+      | Perceptron(_) => Js.log("Perceptron")
+      | Input(inp) => Js.log(inp)
+    },
+    Array.get(Array.get(net, 0), 0).inputNodes
+  ));
+  Array.mapi(
+    (ind, layer) => {
+      Js.log("Layer " ++ string_of_int(ind));
+      Array.map(
+        (perc) => Js.log(perc.output),
+        layer
+      )
+    },
+    net
+  );
+};
+
+let z = makeNetwork([2, 3, 2]);
+setInputs(z, [|Input(0.4), Input(0.2)|]);
+
+calcOutput(z);
+logOutput(z);
