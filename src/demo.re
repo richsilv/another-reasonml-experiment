@@ -1,4 +1,3 @@
-
 type transferFunc = {
   func: (float) => float,
   deriv: (float) => float
@@ -197,6 +196,32 @@ let logOutput= fun(net: network) {
       )
     },
     net
+  );
+};
+
+let backProp = fun(net: network, expectedOutput: array(float)) {
+  let reversed = Array.of_list(List.rev(Array.to_list(net)));
+  let outputLayer = Array.get(reversed, 0);
+  Array.mapi(
+    (ind, perc) => {
+      let dEdO = switch perc.outputNodes {
+        | Output(output) => output -. Array.get(expectedOutput, ind)
+        | Perceptrons(perceptrons) => {
+          perceptrons.mapi()
+        }
+      };
+      let dOdN = perc.transfer.deriv(perc.output);
+      Array.map(
+        (input) => {
+          dEdO *. dOdN *. switch input {
+            | Perceptron(innerPerc) => innerPerc.output
+            | Input(float) => float
+          };
+        },
+        perc.inputNodes
+      );
+    },
+    outputLayer
   );
 };
 
