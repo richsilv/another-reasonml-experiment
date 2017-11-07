@@ -1,3 +1,9 @@
+
+type transferFunc = {
+  func: (float) => float,
+  deriv: (float) => float
+};
+
 type input = Perceptron(perceptron) | Input(float)
 and outputs = Perceptrons(array(perceptron)) | Output(float)
 and perceptron = {
@@ -6,7 +12,7 @@ and perceptron = {
   mutable weights: array(float),
   mutable output: float,
   mutable invalid: bool,
-  transfer: (float) => float,
+  transfer: transferFunc,
 };
 
 type networkInputs = array(input);
@@ -17,8 +23,21 @@ let makeWeights = fun(length: int) => {
     Array.make(length, 0.0));
 };
 
-let relu = fun(inp: float) => {
-  log(1.0 +. exp(inp));
+let relu = {
+  func: fun(inp: float) => {
+    log(1.0 +. exp(inp));
+  },
+  deriv: fun(inp: float) => {
+    1.0 /. (1.0 +. exp(-. inp));
+  }
+};
+
+let sum = fun(arr: array(float)) => {
+  Array.fold_right(
+    (x, y) => x +. y,
+    arr,
+    0.0
+  );
 };
 
 let rec calcOutput = fun(perc: perceptron) => {
@@ -26,7 +45,7 @@ let rec calcOutput = fun(perc: perceptron) => {
     /* perceptron value needs to be recalculated */
     | true => {
       /* multiply inputNode values by weights and pass through transfer function */
-      perc.output = perc.transfer(Array.fold_right(
+      perc.output = perc.transfer.func(Array.fold_right(
         (x, y) => x +. y,
         Array.mapi(
           (ind, inputNode) => {
@@ -55,11 +74,13 @@ let rec calcOutput = fun(perc: perceptron) => {
 
 let makePerceptron = fun(inputs: array(input)) => {
   let perc = {
-    inputNodes: inputs,
+    /* Add an input of 1.0 for bias */
+    inputNodes: Array.append(inputs, [|Input(1.0)|]),
     outputNodes: Output(0.0),
-    weights: makeWeights(Array.length(inputs)),
+    /* An extra weight for the bias */
+    weights: makeWeights(Array.length(inputs) + 1),
     output: 0.0,
-    invalid: false,
+    invalid: true,
     transfer: relu
   };
 
@@ -150,6 +171,14 @@ let setInputs = fun(net: network, inputs: networkInputs) => {
   net;
 };
 
+let calcError = fun(net: network, expectedOutput: array(float)) => {
+  let outputs = calcOutput(net);
+  0.5 *. sum(Array.mapi(
+    (ind, output) => (Array.get(expectedOutput, ind) -. output) ** 2.0,
+    outputs
+  ));
+};
+
 let logOutput= fun(net: network) {
   Js.log("Inputs");
   ignore(Array.map(
@@ -176,3 +205,5 @@ setInputs(z, [|Input(0.4), Input(0.2)|]);
 
 calcOutput(z);
 logOutput(z);
+Js.log("===============");
+Js.log(calcError(z, [|3.5, 2.9|]))
