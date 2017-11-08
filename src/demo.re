@@ -11,6 +11,7 @@ and perceptron = {
   mutable weights: array(float),
   mutable output: float,
   mutable invalid: bool,
+  mutable dEdN: float,
   transfer: transferFunc,
 };
 
@@ -79,12 +80,13 @@ let makePerceptron = fun(inputs: array(input)) => {
     /* An extra weight for the bias */
     weights: makeWeights(Array.length(inputs) + 1),
     output: 0.0,
+    dEdN: 0.0,
     invalid: true,
     transfer: relu
   };
 
   /* Update any input nodes which are perceptrons to have the new node as an output */
-  ignore(Array.map(
+  ignore(Array.iter(
     (thisPerc) => {
       switch thisPerc {
         | Perceptron(thisThisPerc) => {
@@ -155,12 +157,12 @@ let calcOutput = fun(net: network) => {
 
 let setInputs = fun(net: network, inputs: networkInputs) => {
   let inputLayer = Array.get(net, 0);
-  ignore(Array.map(
+  ignore(Array.iter(
     (perc) => perc.inputNodes = inputs,
     inputLayer
   ));
-  ignore(Array.map(
-    (layer) => Array.map(
+  ignore(Array.iter(
+    (layer) => Array.iter(
       (perc) => perc.invalid = true,
       layer
     ),
@@ -180,7 +182,7 @@ let calcError = fun(net: network, expectedOutput: array(float)) => {
 
 let logOutput= fun(net: network) {
   Js.log("Inputs");
-  ignore(Array.map(
+  ignore(Array.iter(
     (inputNode) => switch inputNode {
       | Perceptron(_) => Js.log("Perceptron")
       | Input(inp) => Js.log(inp)
@@ -199,30 +201,84 @@ let logOutput= fun(net: network) {
   );
 };
 
-let backProp = fun(net: network, expectedOutput: array(float)) {
+type eDerivs = array(array(array(float)));
+
+let errorDerivs = fun(net: network, expectedOutput: array(float)) {
   let reversed = Array.of_list(List.rev(Array.to_list(net)));
-  let outputLayer = Array.get(reversed, 0);
-  Array.mapi(
-    (ind, perc) => {
-      let dEdO = switch perc.outputNodes {
+  Array.map(
+    (layer) => {
+      Array.mapi(
+        (ind, perc) => {
+          let dEdO = switch perc.outputNodes {
         | Output(output) => output -. Array.get(expectedOutput, ind)
         | Perceptrons(perceptrons) => {
-          perceptrons.mapi()
-        }
-      };
-      let dOdN = perc.transfer.deriv(perc.output);
-      Array.map(
-        (input) => {
-          dEdO *. dOdN *. switch input {
+          sum(Array.mapi(
+            (innerInd, innerPerc) => {
+              innerPerc.dEdN *. Array.get(innerPerc.weights, innerInd)
+            },
+            perceptrons
+            ));
+          }
+        };
+        let dOdN = perc.transfer.deriv(perc.output);
+        perc.dEdN = dEdO *. dOdN;
+        Array.map(
+          (input) => {
+            perc.dEdN *. switch input {
             | Perceptron(innerPerc) => innerPerc.output
             | Input(float) => float
           };
         },
         perc.inputNodes
+        );
+      },
+      layer
       );
     },
-    outputLayer
+    reversed
   );
+};
+
+type linearObj = Vector(array(float)) | Matrix(array(linearObj));
+exception DimensionMismatch(string);
+
+let rec linearAdd = fun(a: linearObj, b: linearObj): linearObj {
+  switch a {
+    | Vector(u) => {
+      switch b {
+        | Vector(v) => {
+          Vector(Array.mapi(
+            (ind, entry) => entry +. Array.get(u, ind),
+            v
+          ));
+        }
+        | Matrix(_) => {
+          raise(DimensionMismatch("Objects do not have the same dimensions"));
+        }
+      }
+    }
+    | Matrix(m) => {
+      switch b {
+        | Vector(_) => {
+          raise(DimensionMismatch("Objects do not have the same dimensions"));
+        }
+        | Matrix(n) => {
+          Matrix(Array.mapi(
+            (ind, entry) => linearAdd(entry, Array.get(n, ind)),
+            m
+          ));
+        }
+      }
+    }
+  };
+};
+
+let sumDerivs = fun(derivs: list(eDerivs)) {
+  List.fold_right(
+    (thisError, errorSum) => linearAdd(thisError, errorSum),
+    List.tl(derivs),
+    List.hd(derivs)
+  )
 };
 
 let z = makeNetwork([2, 3, 2]);
