@@ -106,7 +106,7 @@ let makePerceptron = fun(inputs: array(input)) => {
 
 type network = array(array(perceptron));
 
-let rec makeNetworkRecursive = fun(shape: list(int), net: option(network)) => {
+let rec recursivelyMakeNetwork = fun(shape: list(int), net: option(network)) => {
   let inputs = switch net {
     | None => {
       Array.make(List.hd(shape), Input(0.0));
@@ -129,7 +129,7 @@ let rec makeNetworkRecursive = fun(shape: list(int), net: option(network)) => {
       existing;
     }
     | [layerSize, ...layers] => {
-      makeNetworkRecursive(
+      recursivelyMakeNetwork(
         layers,
         Some(Array.append(
           existing,
@@ -144,7 +144,7 @@ let rec makeNetworkRecursive = fun(shape: list(int), net: option(network)) => {
 };
 
 let makeNetwork = fun(shape: list(int)) => {
-  makeNetworkRecursive(shape, None);
+  recursivelyMakeNetwork(shape, None);
 };
 
 let calcOutput = fun(net: network) => {
@@ -201,44 +201,6 @@ let logOutput= fun(net: network) {
   );
 };
 
-type eDerivs = array(array(array(float)));
-
-let errorDerivs = fun(net: network, expectedOutput: array(float)) {
-  let reversed = Array.of_list(List.rev(Array.to_list(net)));
-  Array.map(
-    (layer) => {
-      Array.mapi(
-        (ind, perc) => {
-          let dEdO = switch perc.outputNodes {
-        | Output(output) => output -. Array.get(expectedOutput, ind)
-        | Perceptrons(perceptrons) => {
-          sum(Array.mapi(
-            (innerInd, innerPerc) => {
-              innerPerc.dEdN *. Array.get(innerPerc.weights, innerInd)
-            },
-            perceptrons
-            ));
-          }
-        };
-        let dOdN = perc.transfer.deriv(perc.output);
-        perc.dEdN = dEdO *. dOdN;
-        Array.map(
-          (input) => {
-            perc.dEdN *. switch input {
-            | Perceptron(innerPerc) => innerPerc.output
-            | Input(float) => float
-          };
-        },
-        perc.inputNodes
-        );
-      },
-      layer
-      );
-    },
-    reversed
-  );
-};
-
 type linearObj = Vector(array(float)) | Matrix(array(linearObj));
 exception DimensionMismatch(string);
 
@@ -273,7 +235,7 @@ let rec linearAdd = fun(a: linearObj, b: linearObj): linearObj {
   };
 };
 
-let sumDerivs = fun(derivs: list(eDerivs)) {
+let sumDerivs = fun(derivs: list(linearObj)) {
   List.fold_right(
     (thisError, errorSum) => linearAdd(thisError, errorSum),
     List.tl(derivs),
@@ -281,10 +243,86 @@ let sumDerivs = fun(derivs: list(eDerivs)) {
   )
 };
 
-let z = makeNetwork([2, 3, 2]);
-setInputs(z, [|Input(0.4), Input(0.2)|]);
+let errorDerivs = fun(net: network, expectedOutput: array(float)) {
+  let reversed = Array.of_list(List.rev(Array.to_list(net)));
+  Matrix(Array.map(
+    (layer) => {
+      Matrix(Array.mapi(
+        (ind, perc) => {
+          let dEdO = switch perc.outputNodes {
+        | Output(output) => output -. Array.get(expectedOutput, ind)
+        | Perceptrons(perceptrons) => {
+          sum(Array.mapi(
+            (innerInd, innerPerc) => {
+              innerPerc.dEdN *. Array.get(innerPerc.weights, innerInd)
+            },
+            perceptrons
+            ));
+          }
+        };
+        let dOdN = perc.transfer.deriv(perc.output);
+        perc.dEdN = dEdO *. dOdN;
+        Vector(Array.map(
+          (input) => {
+            perc.dEdN *. switch input {
+            | Perceptron(innerPerc) => innerPerc.output
+            | Input(float) => float
+          };
+        },
+        perc.inputNodes
+        ));
+      },
+      layer
+      ));
+    },
+    reversed
+  ));
+};
 
-calcOutput(z);
-logOutput(z);
+let updateWeights = fun(net: network, errorDerivs: linearObj, alpha: float) {
+  switch errorDerivs {
+    | Matrix(layers) => {
+      ignore(Array.mapi(
+        (indA, layer) => {
+          switch layer {
+            | Matrix(percEntries) => {
+              ignore(Array.mapi(
+                (indB, percEntry) => {
+                  switch percEntry {
+                    | Vector(weightErrors) => {
+                      ignore(Array.mapi(
+                        (indC, weightError) => {
+                          let perc = Array.get(Array.get(net, indA), indB);
+                          let currentWeight = Array.get(perc.weights, indC);
+                          Array.set(perc.weights, indC, currentWeight +. (alpha *. weightError));
+                        },
+                        weightErrors
+                      ))
+                    }
+                    | _ => raise(DimensionMismatch("Object does not have the right number of dimensions"));
+                  }
+                },
+                percEntries
+              ))
+            }
+            | _ => raise(DimensionMismatch("Object does not have the right number of dimensions"));
+          }
+        },
+        layers
+      ))
+    }
+    | _ => raise(DimensionMismatch("Object does not have the right number of dimensions"));
+  }
+};
+
+let myNet = makeNetwork([2, 3, 2]);
+setInputs(myNet, [|Input(0.4), Input(0.2)|]);
+
+calcOutput(myNet);
+logOutput(myNet);
 Js.log("===============");
-Js.log(calcError(z, [|3.5, 2.9|]))
+Js.log(calcError(myNet, [|3.5, 2.9|]));
+let derivs = errorDerivs(myNet, [|1.8, 1.2|]);
+updateWeights(myNet, derivs, 1.0);
+calcOutput(myNet);
+logOutput(myNet);
