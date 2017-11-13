@@ -15,7 +15,7 @@ and perceptron = {
   mutable output: float,
   mutable invalid: bool,
   mutable dEdN: float,
-  transfer: transferFunc,
+  mutable transfer: transferFunc,
 };
 
 type networkInputs = array(input);
@@ -33,6 +33,16 @@ let relu = {
   deriv: fun(inp: float) => {
     1.0 /. (1.0 +. exp(-. inp));
   }
+};
+
+let linear ={
+  func: fun(inp: float) => inp,
+  deriv: fun(_) => 1.0
+};
+
+let tanhAct = {
+  func: fun(inp: float) => tanh(inp),
+  deriv: fun(inp: float) => 1.0 -. (tanh(inp) ** 2.0)
 };
 
 let sum = fun(arr: array(float)) => {
@@ -75,7 +85,7 @@ let rec calcOutput = fun(perc: perceptron) => {
   }
 };
 
-let makePerceptron = fun(inputs: array(input)) => {
+let makePerceptron = fun(inputs: array(input), transfer: transferFunc) => {
   let perc = {
     /* Add an input of 1.0 for bias */
     inputNodes: Array.append(inputs, [|Input(1.0)|]),
@@ -85,7 +95,7 @@ let makePerceptron = fun(inputs: array(input)) => {
     output: 0.0,
     dEdN: 0.0,
     invalid: true,
-    transfer: relu
+    transfer: transfer
   };
 
   /* Update any input nodes which are perceptrons to have the new node as an output */
@@ -109,7 +119,7 @@ let makePerceptron = fun(inputs: array(input)) => {
 
 type network = array(array(perceptron));
 
-let rec recursivelyMakeNetwork = fun(shape: list(int), net: option(network)) => {
+let rec recursivelyMakeNetwork = fun(transfer: transferFunc, shape: list(int), net: option(network)) => {
   let inputs = switch net {
     | None => {
       Array.make(List.hd(shape), Input(0.0));
@@ -133,11 +143,12 @@ let rec recursivelyMakeNetwork = fun(shape: list(int), net: option(network)) => 
     }
     | [layerSize, ...layers] => {
       recursivelyMakeNetwork(
+        transfer,
         layers,
         Some(Array.append(
           existing,
           [|Array.map(
-            (_) => makePerceptron(inputs),
+            (_) => makePerceptron(inputs, transfer),
             Array.make(layerSize, 0)
           )|]
         ))
@@ -146,8 +157,8 @@ let rec recursivelyMakeNetwork = fun(shape: list(int), net: option(network)) => 
   }
 };
 
-let makeNetwork = fun(shape: list(int)) => {
-  recursivelyMakeNetwork(shape, None);
+let makeNetwork = fun(tranfer: transferFunc, shape: list(int)) => {
+  recursivelyMakeNetwork(tranfer, shape, None);
 };
 
 let calcOutput = fun(net: network) => {
@@ -247,6 +258,35 @@ let logWeights = fun(net: network) {
 type linearObj = Vector(array(float)) | Matrix(array(linearObj));
 exception DimensionMismatch(string);
 
+let leftPad = fun(s: string, indent: int) {
+  let retString = ref(s);
+  for (_ in 0 to indent) {
+    retString := " " ++ retString^;
+  };
+  retString^
+};
+
+let rec logLinearObj = fun(obj: linearObj, indent: int) {
+  switch obj {
+    | Vector(v) => {
+      Js.log(leftPad(Array.fold_left(
+        (output, x) => output ++ " " ++ string_of_float(x),
+        leftPad("", indent),
+        v
+      ), indent));
+    }
+    | Matrix(m) => {
+      Array.iteri(
+        (ind, innerObj) => {
+          Js.log(leftPad(string_of_int(ind), indent));
+          logLinearObj(innerObj, indent + 2);
+        },
+        m
+      );
+    }
+  }
+};
+
 let rec linearAdd = fun(a: linearObj, b: linearObj): linearObj {
   switch a {
     | Vector(u) => {
@@ -277,6 +317,24 @@ let rec linearAdd = fun(a: linearObj, b: linearObj): linearObj {
     }
   };
 };
+
+let rec linearClip = fun(clipLimit: float, obj: linearObj) {
+  switch obj {
+    | Vector(v) => {
+      Vector(Array.map(
+        (x) => copysign(min(clipLimit, abs_float(x)), x),
+        v
+      ))
+    }
+    | Matrix(m) => {
+      Matrix(Array.map(
+        linearClip(clipLimit),
+        m
+      ));
+    }
+  }
+};
+
 
 let sumDerivs = fun(derivs: list(linearObj)) {
   List.fold_right(
@@ -403,26 +461,69 @@ let trainExample = fun(net: network, errorData: option((linearObj, float)), exam
   };
 };
 
-let trainEpoch = fun(net: network, data: trainingData, alpha: float) {
+type trainingConfig = {
+  shuffle: bool,
+  gradientClip: float,
+  maxEpochs: int,
+  targetError: float,
+  alpha: float
+};
+
+let shuffleList = fun(l: list('a)) {
+  List.fast_sort(
+    (_, _) => Random.int(2) - 1,
+    l
+  );
+};
+
+let trainEpoch = fun(config: trainingConfig, net: network, data: trainingData) {
+  let finalData = config.shuffle ? shuffleList(data) : data;
   let errorData = List.fold_left(
     (errorSoFar, example) => Some(trainExample(net, errorSoFar, example)),
     None,
-    data
+    finalData
   );
   switch errorData {
     | None => 0.0
     | Some(errorData) => {
       let (weightErrors, errorSum) = errorData;
-      ignore(updateWeights(net, weightErrors, alpha));
+      let weightErrors = linearClip(config.gradientClip, weightErrors);
+      logLinearObj(weightErrors, 2);
+      ignore(updateWeights(net, weightErrors, config.alpha));
       errorSum;
     }
   }
 };
 
-let myNet = makeNetwork([5, 5, 1]);
+let setLayerTransfer = fun(net: network, layerInd: int, transfer: transferFunc) {
+  ignore(Array.map(
+    (perc) => perc.transfer = transfer,
+    Array.get(net, layerInd)
+  ));
+};
+
+let trainNetwork = fun(config: trainingConfig, net: network, data: trainingData) {
+  let error = ref(config.targetError +. 1.0);
+  let epochs = ref(0);
+
+  while(epochs^ < config.maxEpochs && error^ > config.targetError) {
+    epochs := epochs^ + 1;
+    error := trainEpoch(config, net, data);
+    Js.log("Epoch " ++ string_of_int(epochs^) ++ ": error is " ++ string_of_float(error^));
+  };
+
+  net;
+};
+
+let myNet = makeNetwork(relu, [5, 1]);
+setLayerTransfer(myNet, 1, linear);
 let data = makeSingleValFunctionData((inp) => Pervasives.abs_float(Pervasives.sin(inp)), -5.0, 5.0, 100);
-Js.log(trainEpoch(myNet, data, 0.001));
-Js.log(trainEpoch(myNet, data, 0.001));
-Js.log(trainEpoch(myNet, data, 0.001));
-Js.log(trainEpoch(myNet, data, 0.001));
-Js.log(trainEpoch(myNet, data, 0.001));
+let config = {
+  shuffle: true,
+  gradientClip: 10000.0,
+  maxEpochs: 1000,
+  targetError: 0.1,
+  alpha: 0.001
+};
+
+trainNetwork(config, myNet, data);
