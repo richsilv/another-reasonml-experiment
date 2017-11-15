@@ -318,6 +318,23 @@ let rec linearAdd = fun(a: linearObj, b: linearObj): linearObj {
   };
 };
 
+let rec linearScalarProd = fun(a: linearObj, p: float): linearObj {
+  switch a {
+    | Vector(u) => {
+      Vector(Array.map(
+        (entry) => entry *. p,
+        u
+      ));
+    }
+    | Matrix(m) => {
+      Matrix(Array.map(
+        (entry) => linearScalarProd(entry, p),
+        m
+      ));
+    }
+  };
+};
+
 let rec linearClip = fun(clipLimit: float, obj: linearObj) {
   switch obj {
     | Vector(v) => {
@@ -386,8 +403,8 @@ let errorDerivs = fun(net: network, expectedOutput: array(outputs)) {
   )))));
 };
 
-let updateWeights = fun(net: network, errorDerivs: linearObj, alpha: float) {
-  switch errorDerivs {
+let updateWeights = fun(net: network, update: linearObj) {
+  switch update {
     | Matrix(layers) => {
       ignore(Array.mapi(
         (indA, layer) => {
@@ -396,12 +413,12 @@ let updateWeights = fun(net: network, errorDerivs: linearObj, alpha: float) {
               ignore(Array.mapi(
                 (indB, percEntry) => {
                   switch percEntry {
-                    | Vector(weightErrors) => {
+                    | Vector(weightUpdates) => {
                       ignore(Array.mapi(
-                        (indC, weightError) => {
+                        (indC, weightUpdate) => {
                           let perc = net[indA][indB];
                           let currentWeight = perc.weights[indC];
-                          Array.set(perc.weights, indC, currentWeight -. (alpha *. weightError));
+                          Array.set(perc.weights, indC, currentWeight -. weightUpdate);
                           switch perc.outputNodes {
                             | Perceptrons(outputPercs) => {
                               ignore(Array.map(
@@ -412,7 +429,7 @@ let updateWeights = fun(net: network, errorDerivs: linearObj, alpha: float) {
                             | Output(_) => ()
                           }
                         },
-                        weightErrors
+                        weightUpdates
                       ));
                     }
                     | _ => raise(DimensionMismatch("Object does not have the right number of dimensions"));
@@ -467,6 +484,7 @@ type trainingConfig = {
   maxEpochs: int,
   targetError: float,
   alpha: float,
+  gamma: float,
   batchSize: int
 };
 
@@ -479,41 +497,52 @@ let shuffleArray = fun(a: array('x)) {
   b;
 };
 
-let trainMiniBatch = fun(config: trainingConfig, net: network, data: trainingData) {
+let trainMiniBatch = fun(config: trainingConfig, net: network, data: trainingData, prevWeightDerivs: option(linearObj)) {
   let errorData = List.fold_left(
     (errorSoFar, example) => Some(trainExample(net, errorSoFar, example)),
     None,
     data
-    );
-    switch errorData {
-    | None => 0.0
+  );
+  switch errorData {
+    | None => (0.0, None)
     | Some(errorData) => {
-      let (weightErrors, errorSum) = errorData;
-      let weightErrors = linearClip(config.gradientClip, weightErrors);
-      ignore(updateWeights(net, weightErrors, config.alpha));
-      errorSum;
+      let (weightDerivs, errorSum) = errorData;
+      let weightUpdate = switch prevWeightDerivs {
+        | None => {
+          linearClip(config.gradientClip, linearScalarProd(weightDerivs, config.alpha));
+        }
+        | Some(prevWeightDerivs) => {
+          linearClip(config.gradientClip, linearAdd(
+            linearScalarProd(prevWeightDerivs, config.gamma),
+            linearScalarProd(weightDerivs, config.alpha)
+          ));
+        }
+      };
+      ignore(updateWeights(net, weightUpdate));
+      (errorSum, Some(weightUpdate));
     }
   }
 };
 
-let trainEpoch = fun(config: trainingConfig, net: network, data: trainingData) {
+let trainEpoch = fun(config: trainingConfig, net: network, data: trainingData, epochPrevWeightDerivs: option(linearObj)) {
   let finalDataArray = config.shuffle ? shuffleArray(Array.of_list(data)) : Array.of_list(data);
   let dataLength = Array.length(finalDataArray);
   let miniBatchSize = switch config.batchSize {
     | 0 => dataLength
     | _ => config.batchSize
   };
-  let (error, _) = Array.fold_left(
+  let (error, prevWeightDerivs, _) = Array.fold_left(
     (iterDetails, _) => {
-      let (error, lastIndex) = iterDetails;
+      let (errorSoFar, prevWeightDerivs, lastIndex) = iterDetails;
       let thisBatchSize = min(miniBatchSize, dataLength - lastIndex);
-      let newError = error +. trainMiniBatch(config, net, Array.to_list(Array.sub(finalDataArray, lastIndex, thisBatchSize)));
-      (newError, lastIndex + thisBatchSize);
+      let (thisError, weightDerivs) = trainMiniBatch(config, net, Array.to_list(Array.sub(finalDataArray, lastIndex, thisBatchSize)), prevWeightDerivs);
+      let newError = errorSoFar +. thisError;
+      (newError, weightDerivs, lastIndex + thisBatchSize);
     },
-    (0.0, 0),
+    (0.0, epochPrevWeightDerivs, 0),
     Array.make(1 + dataLength / miniBatchSize, 0)
   );
-  error;
+  (error, prevWeightDerivs);
 };
 
 let setLayerTransfer = fun(net: network, layerInd: int, transfer: transferFunc) {
@@ -526,10 +555,13 @@ let setLayerTransfer = fun(net: network, layerInd: int, transfer: transferFunc) 
 let trainNetwork = fun(config: trainingConfig, net: network, data: trainingData) {
   let error = ref(config.targetError +. 1.0);
   let epochs = ref(0);
+  let prevWeightDerivs = ref(None);
 
   while(epochs^ < config.maxEpochs && error^ > config.targetError) {
+    let (thisError, theseWeightDerivs) = trainEpoch(config, net, data, prevWeightDerivs^);
     epochs := epochs^ + 1;
-    error := trainEpoch(config, net, data);
+    error := thisError;
+    prevWeightDerivs := theseWeightDerivs;
     Js.log("Epoch " ++ string_of_int(epochs^) ++ ": error is " ++ string_of_float(error^));
   };
 
@@ -538,14 +570,15 @@ let trainNetwork = fun(config: trainingConfig, net: network, data: trainingData)
 
 let myNet = makeNetwork(relu, [5, 1]);
 setLayerTransfer(myNet, 1, linear);
-let data = makeSingleValFunctionData((inp) => Pervasives.abs_float(Pervasives.sin(inp)), -5.0, 5.0, 100);
+let data = makeSingleValFunctionData((inp) => Pervasives.abs_float(Pervasives.sin(inp)), -5.0, 5.0, 500);
 let config = {
   shuffle: true,
   gradientClip: 10000.0,
   maxEpochs: 1000,
   targetError: 0.1,
   alpha: 0.001,
-  batchSize: 20
+  gamma: 0.3,
+  batchSize: 50
 };
 
 trainNetwork(config, myNet, data);
