@@ -20,18 +20,55 @@ and perceptron = {
 
 type networkInputs = array(input);
 
+type trainingConfig = {
+  shuffle: bool,
+  gradientClip: float,
+  maxEpochs: int,
+  targetError: float,
+  gamma: float,
+  batchSize: int,
+  decreasedErrorAlpha: float,
+  increasedErrorAlpha: float,
+  mutable alpha: float
+};
+
 let makeWeights = fun(length: int) => {
   Array.map(
     fun(_) => Random.float(1.0),
     Array.make(length, 0.0));
 };
 
-let relu = {
+let softplus = {
   func: fun(inp: float) => {
-    log(1.0 +. exp(inp));
+    /* Softplus is not numerically stable for large x, but it's
+       also arbitrarily close to the identity fn */
+    if (inp > 32.0) {
+      inp;
+    } else {
+      log(1.0 +. exp(inp));
+    };
   },
   deriv: fun(inp: float) => {
     1.0 /. (1.0 +. exp(-. inp));
+  }
+};
+
+let reluNegGrad = 0.01;
+
+let relu = {
+  func: fun(inp: float) => {
+    if (inp >= 0.0) {
+      inp;
+    } else {
+      reluNegGrad *. inp;
+    };
+  },
+  deriv: fun(inp: float) => {
+    if (inp >= 0.0) {
+      1.0
+    } else {
+      reluNegGrad;
+    }
   }
 };
 
@@ -58,19 +95,26 @@ let rec calcOutput = fun(perc: perceptron) => {
     /* perceptron value needs to be recalculated */
     | true => {
       /* multiply inputNode values by weights and pass through transfer function */
-      perc.output = perc.transfer.func(Array.fold_right(
+      let n = Array.fold_right(
         (x, y) => x +. y,
         Array.mapi(
           (ind, inputNode) => {
             switch inputNode {
-              | Perceptron(thisPerc) => calcOutput(thisPerc) *. perc.weights[ind]
-              | Input(inp) => inp *. perc.weights[ind];
-            }
+              | Perceptron(thisPerc) => {
+                let outp = calcOutput(thisPerc) *. perc.weights[ind];
+                outp;
+              };
+              | Input(inp) => {
+                let outp = inp *. perc.weights[ind];
+                outp;
+              }
+            };
           },
           perc.inputNodes
         ),
         0.0
-      ));
+      );
+      perc.output = perc.transfer.func(n);
       /* Revalidate output */
       perc.invalid = false;
       /* If this is an output node, update the outputNode value */
@@ -117,24 +161,31 @@ let makePerceptron = fun(inputs: array(input), transfer: transferFunc) => {
   perc;
 };
 
-type network = array(array(perceptron));
+type linearObj = Vector(array(float)) | Matrix(array(linearObj));
 
-let rec recursivelyMakeNetwork = fun(transfer: transferFunc, shape: list(int), net: option(network)) => {
-  let inputs = switch net {
+type network = {
+  perceptrons: array(array(perceptron)),
+  config: trainingConfig,
+  mutable velocity: option(linearObj),
+  mutable error: float
+};
+
+let rec recursivelyMakePerceptrons = fun(config: trainingConfig, transfer: transferFunc, shape: list(int), perceptrons: option(array(array(perceptron)))) => {
+  let inputs = switch perceptrons {
     | None => {
       Array.make(List.hd(shape), Input(0.0));
     }
-    | Some(net) => {
+    | Some(perceptrons) => {
       Array.map(
         (perc) => Perceptron(perc),
-        net[Array.length(net) - 1]
+        perceptrons[Array.length(perceptrons) - 1]
       );
     }
   };
 
-  let existing = switch net {
+  let existing = switch perceptrons {
     | None => [||]
-    | Some(net) => net
+    | Some(perceptrons) => perceptrons
   };
 
   switch shape {
@@ -142,7 +193,8 @@ let rec recursivelyMakeNetwork = fun(transfer: transferFunc, shape: list(int), n
       existing;
     }
     | [layerSize, ...layers] => {
-      recursivelyMakeNetwork(
+      recursivelyMakePerceptrons(
+        config,
         transfer,
         layers,
         Some(Array.append(
@@ -157,12 +209,17 @@ let rec recursivelyMakeNetwork = fun(transfer: transferFunc, shape: list(int), n
   }
 };
 
-let makeNetwork = fun(tranfer: transferFunc, shape: list(int)) => {
-  recursivelyMakeNetwork(tranfer, shape, None);
+let makeNetwork = fun(config: trainingConfig, tranfer: transferFunc, shape: list(int)) => {
+  {
+    perceptrons: recursivelyMakePerceptrons(config, tranfer, shape, None),
+    config: config,
+    velocity: None,
+    error: infinity
+  };
 };
 
 let calcOutput = fun(net: network) => {
-  let outputLayer = net[Array.length(net) - 1];
+  let outputLayer = net.perceptrons[Array.length(net.perceptrons) - 1];
   Array.map(
     (perc) => calcOutput(perc),
     outputLayer
@@ -170,7 +227,7 @@ let calcOutput = fun(net: network) => {
 };
 
 let setInputs = fun(net: network, inputs: networkInputs) => {
-  let inputLayer = net[0];
+  let inputLayer = net.perceptrons[0];
   ignore(Array.iter(
     (perc) => {
       perc.inputNodes = inputs;
@@ -190,7 +247,7 @@ let setInputs = fun(net: network, inputs: networkInputs) => {
           inputLayer
         ));
       } else {
-        Js.log("WARNING - you are connecting perceptrons rather than values as network inputs");
+        print_string("WARNING - you are connecting perceptrons rather than values as network inputs");
       };
     },
     inputLayer
@@ -200,7 +257,7 @@ let setInputs = fun(net: network, inputs: networkInputs) => {
       (perc) => perc.invalid = true,
       layer
     ),
-    net
+    net.perceptrons
   ));
 
   net;
@@ -222,40 +279,43 @@ let calcError = fun(net: network, expectedOutput: array(outputs)) => {
 };
 
 let logOutput= fun(net: network) {
-  Js.log("Inputs");
+  print_string("Inputs");
   ignore(Array.iter(
     (inputNode) => switch inputNode {
-      | Perceptron(_) => Js.log("Perceptron")
-      | Input(inp) => Js.log(inp)
+      | Perceptron(_) => print_string("Perceptron")
+      | Input(inp) => print_float(inp)
     },
-    net[0][0].inputNodes
+    net.perceptrons[0][0].inputNodes
   ));
   Array.mapi(
     (ind, layer) => {
-      Js.log("Layer " ++ string_of_int(ind));
+      print_string("Layer " ++ string_of_int(ind));
       Array.map(
-        (perc) => Js.log(perc.output),
+        (perc) => print_float(perc.output),
         layer
       )
     },
-    net
+    net.perceptrons
   );
 };
 
 let logWeights = fun(net: network) {
   ignore(Array.mapi(
     (ind, layer) => {
-      Js.log("Layer " ++ string_of_int(ind));
+      print_string("Layer " ++ string_of_int(ind));
       Array.map(
-        (perc) => Js.log(perc.weights),
+        (perc) => print_string(Array.fold_left(
+          (), //TODO
+          "",
+          perc.weights
+        )),
         layer
       )
     },
-    net
+    net.perceptrons
   ));
 };
 
-type linearObj = Vector(array(float)) | Matrix(array(linearObj));
 exception DimensionMismatch(string);
 
 let leftPad = fun(s: string, indent: int) {
@@ -362,12 +422,12 @@ let sumDerivs = fun(derivs: list(linearObj)) {
 };
 
 let errorDerivs = fun(net: network, expectedOutput: array(outputs)) {
-  let reversed = Array.of_list(List.rev(Array.to_list(net)));
+  let reversed = Array.of_list(List.rev(Array.to_list(net.perceptrons)));
   Matrix(Array.of_list(List.rev(Array.to_list(Array.map(
     (layer) => {
       Matrix(Array.mapi(
-        (ind, perc) => {
-          let dEdO = switch perc.outputNodes {
+        (ind, thisPerc) => {
+          let dEdO = switch thisPerc.outputNodes {
             | Output(output) => {
               let thisExpectedOutput = expectedOutput[ind];
               switch thisExpectedOutput {
@@ -375,36 +435,38 @@ let errorDerivs = fun(net: network, expectedOutput: array(outputs)) {
                 | Perceptrons(_) => raise(WrongNodeType("Perceptron"))
               };
             }
-            | Perceptrons(perceptrons) => {
-              sum(Array.mapi(
-                (innerInd, innerPerc) => {
-                  innerPerc.dEdN *. innerPerc.weights[innerInd]
+            | Perceptrons(outputPercs) => {
+              sum(Array.map(
+                (outputPerc) => {
+                  /*  Here we are using the index of THIS neuron to access the weight index of this neuron's
+                      input into the output neuron. */
+                  outputPerc.dEdN *. outputPerc.weights[ind]
                 },
-                perceptrons
+                outputPercs
               ));
             }
           };
-          let dOdN = perc.transfer.deriv(perc.output);
-          perc.dEdN = dEdO *. dOdN;
+          let dOdN = thisPerc.transfer.deriv(thisPerc.output);
+          thisPerc.dEdN = dEdO *. dOdN;
           Vector(Array.map(
-            (input) => {
-              perc.dEdN *. switch input {
-              | Perceptron(innerPerc) => innerPerc.output
-              | Input(float) => float
-            };
-          },
-          perc.inputNodes
-        ));
-      },
-      layer
+            (inputNode) => {
+              thisPerc.dEdN *. switch inputNode {
+                | Perceptron(inputPerc) => inputPerc.output
+                | Input(float) => float
+              };
+            },
+            thisPerc.inputNodes
+          ));
+        },
+        layer
       ));
     },
     reversed
   )))));
 };
 
-let updateWeights = fun(net: network, update: linearObj) {
-  switch update {
+let updateWeights = fun(net: network, velocity: linearObj) {
+  switch velocity {
     | Matrix(layers) => {
       ignore(Array.mapi(
         (indA, layer) => {
@@ -416,7 +478,7 @@ let updateWeights = fun(net: network, update: linearObj) {
                     | Vector(weightUpdates) => {
                       ignore(Array.mapi(
                         (indC, weightUpdate) => {
-                          let perc = net[indA][indB];
+                          let perc = net.perceptrons[indA][indB];
                           let currentWeight = perc.weights[indC];
                           Array.set(perc.weights, indC, currentWeight -. weightUpdate);
                           switch perc.outputNodes {
@@ -445,7 +507,8 @@ let updateWeights = fun(net: network, update: linearObj) {
       ))
     }
     | _ => raise(DimensionMismatch("Object does not have the right number of dimensions"));
-  }
+  };
+  net.velocity = Some(velocity);
 };
 
 type trainingData = list((array(input), array(outputs)));
@@ -478,16 +541,6 @@ let trainExample = fun(net: network, errorData: option((linearObj, float)), exam
   };
 };
 
-type trainingConfig = {
-  shuffle: bool,
-  gradientClip: float,
-  maxEpochs: int,
-  targetError: float,
-  alpha: float,
-  gamma: float,
-  batchSize: int
-};
-
 let shuffleArray = fun(a: array('x)) {
   let b = Array.copy(a);
   Array.fast_sort(
@@ -497,88 +550,95 @@ let shuffleArray = fun(a: array('x)) {
   b;
 };
 
-let trainMiniBatch = fun(config: trainingConfig, net: network, data: trainingData, prevWeightDerivs: option(linearObj)) {
+let trainMiniBatch = fun(net: network, data: trainingData) {
   let errorData = List.fold_left(
     (errorSoFar, example) => Some(trainExample(net, errorSoFar, example)),
     None,
     data
   );
   switch errorData {
-    | None => (0.0, None)
+    | None => 0.0;
     | Some(errorData) => {
       let (weightDerivs, errorSum) = errorData;
-      let weightUpdate = switch prevWeightDerivs {
+      let newVelocity = switch net.velocity {
         | None => {
-          linearClip(config.gradientClip, linearScalarProd(weightDerivs, config.alpha));
+          linearClip(net.config.gradientClip, linearScalarProd(weightDerivs, net.config.alpha));
         }
-        | Some(prevWeightDerivs) => {
-          linearClip(config.gradientClip, linearAdd(
-            linearScalarProd(prevWeightDerivs, config.gamma),
-            linearScalarProd(weightDerivs, config.alpha)
+        | Some(velocity) => {
+          linearClip(net.config.gradientClip, linearAdd(
+            linearScalarProd(velocity, net.config.gamma),
+            linearScalarProd(weightDerivs, (1.0 -. net.config.gamma) *. net.config.alpha /. float_of_int(net.config.batchSize))
           ));
         }
       };
-      ignore(updateWeights(net, weightUpdate));
-      (errorSum, Some(weightUpdate));
+      ignore(updateWeights(net, newVelocity));
+      errorSum;
     }
   }
 };
 
-let trainEpoch = fun(config: trainingConfig, net: network, data: trainingData, epochPrevWeightDerivs: option(linearObj)) {
-  let finalDataArray = config.shuffle ? shuffleArray(Array.of_list(data)) : Array.of_list(data);
+let trainEpoch = fun(net: network, data: trainingData) {
+  let finalDataArray = net.config.shuffle ? shuffleArray(Array.of_list(data)) : Array.of_list(data);
   let dataLength = Array.length(finalDataArray);
-  let miniBatchSize = switch config.batchSize {
+  let miniBatchSize = switch net.config.batchSize {
     | 0 => dataLength
-    | _ => config.batchSize
+    | _ => net.config.batchSize
   };
-  let (error, prevWeightDerivs, _) = Array.fold_left(
+  let (error, _) = Array.fold_left(
     (iterDetails, _) => {
-      let (errorSoFar, prevWeightDerivs, lastIndex) = iterDetails;
+      let (errorSoFar, lastIndex) = iterDetails;
       let thisBatchSize = min(miniBatchSize, dataLength - lastIndex);
-      let (thisError, weightDerivs) = trainMiniBatch(config, net, Array.to_list(Array.sub(finalDataArray, lastIndex, thisBatchSize)), prevWeightDerivs);
+      let thisError = trainMiniBatch(net, Array.to_list(Array.sub(finalDataArray, lastIndex, thisBatchSize)));
       let newError = errorSoFar +. thisError;
-      (newError, weightDerivs, lastIndex + thisBatchSize);
+      (newError, lastIndex + thisBatchSize);
     },
-    (0.0, epochPrevWeightDerivs, 0),
+    (0.0, 0),
     Array.make(1 + dataLength / miniBatchSize, 0)
   );
-  (error, prevWeightDerivs);
+  if (error < net.error) {
+    net.config.alpha = net.config.alpha *. net.config.decreasedErrorAlpha;
+  } else {
+    net.config.alpha = net.config.alpha *. net.config.increasedErrorAlpha;
+  };
+  net.error = error;
+  error;
 };
 
 let setLayerTransfer = fun(net: network, layerInd: int, transfer: transferFunc) {
   ignore(Array.map(
     (perc) => perc.transfer = transfer,
-    net[layerInd]
+    net.perceptrons[layerInd]
   ));
 };
 
-let trainNetwork = fun(config: trainingConfig, net: network, data: trainingData) {
-  let error = ref(config.targetError +. 1.0);
+let trainNetwork = fun(net: network, data: trainingData) {
+  let error = ref(net.config.targetError +. 1.0);
   let epochs = ref(0);
-  let prevWeightDerivs = ref(None);
 
-  while(epochs^ < config.maxEpochs && error^ > config.targetError) {
-    let (thisError, theseWeightDerivs) = trainEpoch(config, net, data, prevWeightDerivs^);
+  while(epochs^ < net.config.maxEpochs && error^ > net.config.targetError) {
+    let thisError = trainEpoch(net, data);
     epochs := epochs^ + 1;
     error := thisError;
-    prevWeightDerivs := theseWeightDerivs;
-    Js.log("Epoch " ++ string_of_int(epochs^) ++ ": error is " ++ string_of_float(error^));
+    Js.log2("Epoch " ++ string_of_int(epochs^) ++ ": error is " ++ string_of_float(error^), "Alpha is " ++ string_of_float(net.config.alpha));
   };
 
   net;
 };
 
-let myNet = makeNetwork(relu, [5, 1]);
-setLayerTransfer(myNet, 1, linear);
 let data = makeSingleValFunctionData((inp) => Pervasives.abs_float(Pervasives.sin(inp)), -5.0, 5.0, 500);
 let config = {
   shuffle: true,
   gradientClip: 10000.0,
-  maxEpochs: 1000,
+  maxEpochs: 10000,
   targetError: 0.1,
   alpha: 0.001,
-  gamma: 0.3,
-  batchSize: 50
+  increasedErrorAlpha: 0.5,
+  decreasedErrorAlpha: 1.05,
+  gamma: 0.5,
+  batchSize: 100
 };
+let myNet = makeNetwork(config, softplus, [15, 15, 1]);
+/* setLayerTransfer(myNet, 2, relu); */
+setLayerTransfer(myNet, 2, linear);
 
-trainNetwork(config, myNet, data);
+trainNetwork(myNet, data);
