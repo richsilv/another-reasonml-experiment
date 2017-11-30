@@ -1,5 +1,6 @@
-let seed: int = [%bs.raw "parseInt(Math.random() * Number.MAX_SAFE_INTEGER)"];
-Random.init(seed);
+Random.init(1);
+let updateSeed = fun(newSeed: int) => Random.init(newSeed);
+Arg.parse([("-seed", Int(updateSeed), "Use the specified seed")], (_: string) => (), "Neural network");
 
 type transferFunc = {
   func: (float) => float,
@@ -29,13 +30,18 @@ type trainingConfig = {
   batchSize: int,
   decreasedErrorAlpha: float,
   increasedErrorAlpha: float,
-  mutable alpha: float
+  minAlpha: float,
+  mutable alpha: float,
 };
 
 let makeWeights = fun(length: int) => {
   Array.map(
     fun(_) => Random.float(1.0),
     Array.make(length, 0.0));
+};
+
+let print_string_ln = fun(str: string) => {
+  print_string(str ++ "\n");
 };
 
 let softplus = {
@@ -247,7 +253,7 @@ let setInputs = fun(net: network, inputs: networkInputs) => {
           inputLayer
         ));
       } else {
-        print_string("WARNING - you are connecting perceptrons rather than values as network inputs");
+        print_string_ln("WARNING - you are connecting perceptrons rather than values as network inputs");
       };
     },
     inputLayer
@@ -279,17 +285,17 @@ let calcError = fun(net: network, expectedOutput: array(outputs)) => {
 };
 
 let logOutput= fun(net: network) {
-  print_string("Inputs");
+  print_string_ln("Inputs");
   ignore(Array.iter(
     (inputNode) => switch inputNode {
-      | Perceptron(_) => print_string("Perceptron")
+      | Perceptron(_) => print_string_ln("Perceptron")
       | Input(inp) => print_float(inp)
     },
     net.perceptrons[0][0].inputNodes
   ));
   Array.mapi(
     (ind, layer) => {
-      print_string("Layer " ++ string_of_int(ind));
+      print_string_ln("Layer " ++ string_of_int(ind));
       Array.map(
         (perc) => print_float(perc.output),
         layer
@@ -302,10 +308,10 @@ let logOutput= fun(net: network) {
 let logWeights = fun(net: network) {
   ignore(Array.mapi(
     (ind, layer) => {
-      print_string("Layer " ++ string_of_int(ind));
+      print_string_ln("Layer " ++ string_of_int(ind));
       Array.map(
-        (perc) => print_string(Array.fold_left(
-          (), //TODO
+        (perc) => print_string_ln(Array.fold_left(
+          (soFar, weight) => soFar ++ " " ++ string_of_float(weight),
           "",
           perc.weights
         )),
@@ -329,7 +335,7 @@ let leftPad = fun(s: string, indent: int) {
 let rec logLinearObj = fun(obj: linearObj, indent: int) {
   switch obj {
     | Vector(v) => {
-      Js.log(leftPad(Array.fold_left(
+      print_string_ln(leftPad(Array.fold_left(
         (output, x) => output ++ " " ++ string_of_float(x),
         leftPad("", indent),
         v
@@ -338,7 +344,7 @@ let rec logLinearObj = fun(obj: linearObj, indent: int) {
     | Matrix(m) => {
       Array.iteri(
         (ind, innerObj) => {
-          Js.log(leftPad(string_of_int(ind), indent));
+          print_string_ln(leftPad(string_of_int(ind), indent));
           logLinearObj(innerObj, indent + 2);
         },
         m
@@ -598,7 +604,7 @@ let trainEpoch = fun(net: network, data: trainingData) {
   if (error < net.error) {
     net.config.alpha = net.config.alpha *. net.config.decreasedErrorAlpha;
   } else {
-    net.config.alpha = net.config.alpha *. net.config.increasedErrorAlpha;
+    net.config.alpha = max(net.config.alpha *. net.config.increasedErrorAlpha, net.config.minAlpha);
   };
   net.error = error;
   error;
@@ -619,7 +625,7 @@ let trainNetwork = fun(net: network, data: trainingData) {
     let thisError = trainEpoch(net, data);
     epochs := epochs^ + 1;
     error := thisError;
-    Js.log2("Epoch " ++ string_of_int(epochs^) ++ ": error is " ++ string_of_float(error^), "Alpha is " ++ string_of_float(net.config.alpha));
+    print_string_ln("Epoch " ++ string_of_int(epochs^) ++ ": error is " ++ string_of_float(error^) ++ "; Alpha is " ++ string_of_float(net.config.alpha));
   };
 
   net;
@@ -632,13 +638,15 @@ let config = {
   maxEpochs: 10000,
   targetError: 0.1,
   alpha: 0.001,
+  minAlpha: 0.00000001,
   increasedErrorAlpha: 0.5,
   decreasedErrorAlpha: 1.05,
   gamma: 0.5,
   batchSize: 100
 };
-let myNet = makeNetwork(config, softplus, [15, 15, 1]);
-/* setLayerTransfer(myNet, 2, relu); */
-setLayerTransfer(myNet, 2, linear);
+let myNet = makeNetwork(config, tanhAct, [5, 10, 15, 10, 5, 1]);
+setLayerTransfer(myNet, 1, relu);
+setLayerTransfer(myNet, 3, relu);
+setLayerTransfer(myNet, 5, linear);
 
 trainNetwork(myNet, data);
